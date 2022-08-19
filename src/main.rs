@@ -5,6 +5,8 @@ use sonnerie::*;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
 	use clap::{Arg, SubCommand};
@@ -146,6 +148,10 @@ fn main() -> std::io::Result<()> {
 						.help("read values after (and including) this time, as --before-time")
 						.takes_value(true)
 					)
+					.arg(Arg::with_name("replay")
+						.long("replay")
+						.help("Replays the records with the same speed as they were emited")
+					)
 					.arg(Arg::with_name("parallel")
 						.long("parallel")
 						.help("Run several of this command in parallel, piping a portion of the results into each. Keys are never divided between two commands.")
@@ -186,6 +192,7 @@ fn main() -> std::io::Result<()> {
 
 		delete(dir, after_key, before_key, after_time, before_time, filter);
 	} else if let Some(matches) = matches.subcommand_matches("read") {
+		let replay_mode = matches.is_present("replay");
 		let print_format = matches.is_present("print-format");
 		let timestamp_format = matches.value_of("timestamp-format").unwrap_or("%F %T");
 		let timestamp_nanos = matches.is_present("timestamp-nanos");
@@ -274,6 +281,7 @@ fn main() -> std::io::Result<()> {
 		}
 		macro_rules! filter {
 			($filter:expr) => {{
+				let mut previous_ts = after_time;
 				for record in $filter {
 					let ts = record.timestamp_nanos();
 					if let Some(after_time) = after_time {
@@ -286,13 +294,26 @@ fn main() -> std::io::Result<()> {
 							continue;
 						}
 					}
+
+					if replay_mode {
+						if let Some(previous_ts) = previous_ts {
+							let diff = Duration::from_nanos(ts.saturating_sub(previous_ts));
+							thread::sleep(diff);
+						}
+						previous_ts = Some(ts);
+					}
+
 					formatted::print_record(
 						&record,
 						&mut stdout,
 						print_timestamp,
 						print_record_format,
 					)?;
-					writeln!(&mut stdout, "")?;
+					writeln!(&mut stdout)?;
+
+					if replay_mode {
+						stdout.flush()?;
+					}
 				}
 			}};
 		}
@@ -416,9 +437,11 @@ fn compact(
 		// a thread that reads from "db" and writes to the child
 		let reader_db = db.clone();
 		let reader_thread = std::thread::spawn(move || -> std::io::Result<()> {
-			let timestamp_format =
-				if let Some(ts_format) = &ts_format_cloned { formatted::PrintTimestamp::FormatString(&ts_format) }
-				else { formatted::PrintTimestamp::Nanos };
+			let timestamp_format = if let Some(ts_format) = &ts_format_cloned {
+				formatted::PrintTimestamp::FormatString(&ts_format)
+			} else {
+				formatted::PrintTimestamp::Nanos
+			};
 
 			let reader = reader_db.get_range(..);
 			for record in reader {
